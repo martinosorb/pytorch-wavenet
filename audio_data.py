@@ -1,11 +1,9 @@
 import os
 import os.path
 import math
-import threading
 import torch
 import torch.utils.data
 import numpy as np
-import librosa as lr
 import bisect
 
 
@@ -60,6 +58,8 @@ class WavenetDataset(torch.utils.data.Dataset):
         # assign every *test_stride*th item to the test set
 
     def create_dataset(self, location, out_file):
+        import librosa as lr
+
         print("create dataset from audio files at", location)
         self.dataset_file = out_file
         files = list_all_audio_files(location)

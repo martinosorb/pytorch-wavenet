@@ -1,4 +1,3 @@
-import tensorflow as tf
 import numpy as np
 import scipy.misc
 import threading
@@ -67,6 +66,8 @@ class TensorboardLogger(Logger):
                  trainer=None,
                  generate_function=None,
                  log_dir='logs'):
+        import tensorflow as tf
+
         super().__init__(log_interval, validation_interval, generate_interval, trainer, generate_function)
         self.writer = tf.summary.FileWriter(log_dir)
 
@@ -161,4 +162,3 @@ class TensorboardLogger(Logger):
         summary = tf.Summary(value=[tf.Summary.Value(tag=tag, tensor=tf_tensor)])
         #summary = tf.summary.tensor_summary(name=tag, tensor=tensor)
         self.writer.add_summary(summary, step)
-

@@ -1,8 +1,17 @@
 import os
 import os.path
 import time
-from wavenet_modules import *
-from audio_data import *
+from wavenet_modules import DilatedQueue, dilate, constant_pad_1d
+import torch.nn.functional as F
+from torch.autograd import Variable
+from torch import nn
+import torch
+import numpy as np
+
+
+def mu_law_expansion(data, mu):
+    s = np.sign(data) * (np.exp(np.abs(data) * np.log(mu + 1)) - 1) / mu
+    return s
 
 
 class WaveNetModel(nn.Module):
@@ -18,7 +27,7 @@ class WaveNetModel(nn.Module):
         classes (Int):              Number of possible values each sample can have
         output_length (Int):        Number of samples that are generated for each input
         kernel_size (Int):          Size of the dilation kernel
-        dtype:                      Parameter type of this model
+        device:                     Device
 
     Shape:
         - Input: :math:`(N, C_{in}, L_{in})`
@@ -35,7 +44,7 @@ class WaveNetModel(nn.Module):
                  classes=256,
                  output_length=32,
                  kernel_size=2,
-                 dtype=torch.FloatTensor,
+                 device='cuda' if torch.cuda.is_available() else 'cpu',
                  bias=False):
 
         super(WaveNetModel, self).__init__()
@@ -47,7 +56,8 @@ class WaveNetModel(nn.Module):
         self.skip_channels = skip_channels
         self.classes = classes
         self.kernel_size = kernel_size
-        self.dtype = dtype
+        self.device = device
+        self.dtype = torch.cuda.FloatTensor if device == 'cuda' else torch.FloatTensor
 
         # build model
         receptive_field = 1
@@ -75,10 +85,11 @@ class WaveNetModel(nn.Module):
                 self.dilations.append((new_dilation, init_dilation))
 
                 # dilated queues for fast generation
-                self.dilated_queues.append(DilatedQueue(max_length=(kernel_size - 1) * new_dilation + 1,
-                                                        num_channels=residual_channels,
-                                                        dilation=new_dilation,
-                                                        dtype=dtype))
+                self.dilated_queues.append(DilatedQueue(
+                    max_length=(kernel_size - 1) * new_dilation + 1,
+                    num_channels=residual_channels,
+                    dilation=new_dilation,
+                    dtype=self.dtype))
 
                 # dilated convolutions
                 self.filter_convs.append(nn.Conv1d(in_channels=residual_channels,
@@ -109,9 +120,9 @@ class WaveNetModel(nn.Module):
                 new_dilation *= 2
 
         self.end_conv_1 = nn.Conv1d(in_channels=skip_channels,
-                                  out_channels=end_channels,
-                                  kernel_size=1,
-                                  bias=True)
+                                    out_channels=end_channels,
+                                    kernel_size=1,
+                                    bias=True)
 
         self.end_conv_2 = nn.Conv1d(in_channels=end_channels,
                                     out_channels=classes,
@@ -153,7 +164,7 @@ class WaveNetModel(nn.Module):
             # parametrized skip connection
             s = x
             if x.size(2) != 1:
-                 s = dilate(x, 1, init_dilation=dilation)
+                s = dilate(x, 1, init_dilation=dilation)
             s = self.skip_convs[i](s)
             try:
                 skip = skip[:, :, -s.size(2):]
@@ -211,7 +222,8 @@ class WaveNetModel(nn.Module):
 
         for i in range(num_samples):
             input = Variable(torch.FloatTensor(1, self.classes, self.receptive_field).zero_())
-            input = input.scatter_(1, generated[-self.receptive_field:].view(1, -1, self.receptive_field), 1.)
+            input = input.scatter_(
+                1, generated[-self.receptive_field:].view(1, -1, self.receptive_field), 1.)
 
             x = self.wavenet(input,
                              dilation_func=self.wavenet_dilate)[:, :, -1].squeeze()
@@ -222,7 +234,7 @@ class WaveNetModel(nn.Module):
                 prob = prob.cpu()
                 np_prob = prob.data.numpy()
                 x = np.random.choice(self.classes, p=np_prob)
-                x = Variable(torch.LongTensor([x]))#np.array([x])
+                x = Variable(torch.LongTensor([x]))  # np.array([x])
             else:
                 x = torch.max(x, 0)[1].float()
 
@@ -253,7 +265,7 @@ class WaveNetModel(nn.Module):
         num_given_samples = first_samples.size(0)
         total_samples = num_given_samples + num_samples
 
-        input = Variable(torch.FloatTensor(1, self.classes, 1).zero_())
+        input = torch.zeros((1, self.classes, 1), device=self.device)
         input = input.scatter_(1, first_samples[0:1].view(1, -1, 1), 1.)
 
         # fill queues with given samples
@@ -270,7 +282,7 @@ class WaveNetModel(nn.Module):
 
         # generate new samples
         generated = np.array([])
-        regularizer = torch.pow(Variable(torch.arange(self.classes)) - self.classes / 2., 2)
+        regularizer = torch.pow(torch.arange(self.classes, device=self.device) - self.classes / 2., 2)
         regularizer = regularizer.squeeze() * regularize
         tic = time.time()
         for i in range(num_samples):
@@ -297,7 +309,7 @@ class WaveNetModel(nn.Module):
             generated = np.append(generated, o)
 
             # set new input
-            x = Variable(torch.from_numpy(x).type(torch.LongTensor))
+            x = torch.from_numpy(x).astype(torch.long).to(self.device)
             input.zero_()
             input = input.scatter_(1, x.view(1, -1, 1), 1.).view(1, self.classes, 1)
 
@@ -313,7 +325,6 @@ class WaveNetModel(nn.Module):
         self.train()
         mu_gen = mu_law_expansion(generated, self.classes)
         return mu_gen
-
 
     def parameter_count(self):
         par = list(self.parameters())

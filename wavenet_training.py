@@ -2,11 +2,9 @@ import torch
 import torch.optim as optim
 import torch.utils.data
 import time
-from datetime import datetime
 import torch.nn.functional as F
-from torch.autograd import Variable
 from model_logging import Logger
-from wavenet_modules import *
+import numpy as np
 
 
 def print_last_loss(opt):
@@ -29,8 +27,7 @@ class WavenetTrainer:
                  snapshot_path=None,
                  snapshot_name='snapshot',
                  snapshot_interval=1000,
-                 dtype=torch.FloatTensor,
-                 ltype=torch.LongTensor):
+                 device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.model = model
         self.dataset = dataset
         self.dataloader = None
@@ -38,14 +35,15 @@ class WavenetTrainer:
         self.weight_decay = weight_decay
         self.clip = gradient_clipping
         self.optimizer_type = optimizer
-        self.optimizer = self.optimizer_type(params=self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        self.optimizer = self.optimizer_type(params=self.model.parameters(),
+                                             lr=self.lr,
+                                             weight_decay=self.weight_decay)
         self.logger = logger
         self.logger.trainer = self
         self.snapshot_path = snapshot_path
         self.snapshot_name = snapshot_name
         self.snapshot_interval = snapshot_interval
-        self.dtype = dtype
-        self.ltype = ltype
+        self.device = device
 
     def train(self,
               batch_size=32,
@@ -62,14 +60,14 @@ class WavenetTrainer:
             print("epoch", current_epoch)
             tic = time.time()
             for (x, target) in iter(self.dataloader):
-                x = Variable(x.type(self.dtype))
-                target = Variable(target.view(-1).type(self.ltype))
+                x = x.to(self.device)
+                target = target.view(-1).to(self.device)
 
                 output = self.model(x)
                 loss = F.cross_entropy(output.squeeze(), target.squeeze())
                 self.optimizer.zero_grad()
                 loss.backward()
-                loss = loss.data[0]
+                loss = loss.data.item()
 
                 if self.clip is not None:
                     torch.nn.utils.clip_grad_norm(self.model.parameters(), self.clip)
@@ -79,7 +77,7 @@ class WavenetTrainer:
                 # time step duration:
                 if step == 100:
                     toc = time.time()
-                    print("one training step does take approximately " + str((toc - tic) * 0.01) + " seconds)")
+                    print("one training step takes approximately " + str((toc - tic) * 0.01) + " seconds)")
 
                 if step % self.snapshot_interval == 0:
                     if self.snapshot_path is None:
@@ -95,16 +93,16 @@ class WavenetTrainer:
         total_loss = 0
         accurate_classifications = 0
         for (x, target) in iter(self.dataloader):
-            x = Variable(x.type(self.dtype))
-            target = Variable(target.view(-1).type(self.ltype))
+            x = x.to(self.device)
+            target = target.view(-1).to(self.device)
 
             output = self.model(x)
             loss = F.cross_entropy(output.squeeze(), target.squeeze())
-            total_loss += loss.data[0]
+            total_loss += loss.data.item()
 
             predictions = torch.max(output, 1)[1].view(-1)
             correct_pred = torch.eq(target, predictions)
-            accurate_classifications += torch.sum(correct_pred).data[0]
+            accurate_classifications += torch.sum(correct_pred).item()
         # print("validate model with " + str(len(self.dataloader.dataset)) + " samples")
         # print("average loss: ", total_loss / len(self.dataloader))
         avg_loss = total_loss / len(self.dataloader)
@@ -122,4 +120,3 @@ def generate_audio(model,
         samples.append(model.generate_fast(length, temperature=temp))
     samples = np.stack(samples, axis=0)
     return samples
-
